@@ -1,6 +1,69 @@
-.venv/
+# .venv/
+# __pycache__/
+# .env
+# *.pyc
+# *.pdf
+# vector_store/
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
-.env
-*.pyc
-*.pdf
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+.venv310/
+.python-version
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode / JetBrains IDE settings
+.vscode/
+.idea/
+
+# macOS system files
+.DS_Store
+
+# Model and data caches
+model_cache/
+eval/
 vector_store/
+*.onnx
+*.pt
+*.pth
+
+# Hugging Face Transformers cache
+~/.cache/huggingface/
+~/.huggingface/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# SSH / shell artifacts mistakenly tracked
+eval "$(ssh-agent -s)"
+eval "$(ssh-agent -s)".pub
+
+# UI build outputs if frontend is used
+node_modules/
+dist/
+
+# Output files / temporary checkpoints
+*.ckpt
+*.bin
+*.h5
+*.tflite
+
+# OS-generated files
+Thumbs.db
+ehthumbs.db
+
