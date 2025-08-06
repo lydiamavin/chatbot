@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Pinecone as PineconeVectorStore
+from langchain_pinecone import PineconeVectorStore
 from langchain_core.documents import Document
 from pinecone import Pinecone, ServerlessSpec
 from ingest.chunk_documents import load_and_chunk
@@ -42,9 +42,19 @@ if PINECONE_INDEX_NAME not in pc.list_indexes().names():
 index = pc.Index(PINECONE_INDEX_NAME)
 
 # Step 6: Use Langchain’s Pinecone vectorstore wrapper
-vectorstore = PineconeVectorStore(index=index, embedding=embedding_model, text_key="text")
+vectorstore = PineconeVectorStore(
+    index_name=PINECONE_INDEX_NAME,
+    embedding=embedding_model,
+    pinecone_api_key=PINECONE_API_KEY
+)
 
+
+# print("🔍 Testing similarity search:")
+# results = vectorstore.similarity_search("What is the policy?", k=2)
+# for i, doc in enumerate(results):
+#     print(f"Result {i+1}: {doc.page_content[:200]}")
 # Step 7: Add documents
 vectorstore.add_documents(documents)
 
 print(f"✅ Successfully embedded and added {len(documents)} documents to Pinecone.")
+

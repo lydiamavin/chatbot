@@ -15,20 +15,21 @@ spec.loader.exec_module(query_module)
 
 vectorstore = query_module.vectorstore
 from langchain.chains import RetrievalQA
-from langchain_huggingface import HuggingFaceEndpoint
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from langchain_huggingface import HuggingFacePipeline
 
 # Setup page
 st.set_page_config(page_title="RAG Chatbot", layout="wide")
 st.title("💬 RAG-based Chatbot")
 
 # Initialize LLM
-llm = HuggingFaceEndpoint(
-    repo_id="google/flan-t5-base",
-    task="text-generation",
-    temperature=0.5,
-    max_new_tokens=200,
-    huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_API_TOKEN")
-)
+model_id = "google/flan-t5-base"  # You can change this if needed
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+
+pipe = pipeline("text2text-generation", model=model, tokenizer=tokenizer, max_new_tokens=256)
+llm = HuggingFacePipeline(pipeline=pipe)
 
 # Build RAG chain
 qa_chain = RetrievalQA.from_chain_type(

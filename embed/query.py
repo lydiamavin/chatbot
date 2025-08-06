@@ -20,7 +20,8 @@ load_dotenv()
 # 1. Embedding model from langchain_huggingface (no torch/sentence_transformers)
 embedding_model = HuggingFaceEmbeddings(
     model_name=EMBEDDING_MODEL_NAME,
-    cache_folder=EMBEDDING_MODEL_CACHE
+    cache_folder=EMBEDDING_MODEL_CACHE,
+    model_kwargs={"device": "cpu"}
 )
 
 # 2. Pinecone setup
