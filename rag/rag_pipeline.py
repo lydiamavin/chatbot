@@ -1,25 +1,23 @@
-# rag/rag_pipeline.py
-
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
-from langchain.llms import HuggingFacePipeline
-from transformers import pipeline
+from langchain_community.llms import HuggingFaceHub
+from embed.query import vectorstore
 
-# Load embedding
-embedding = HuggingFaceEmbeddings(model_name="hkunlp/instructor-xl")
+# Load LLM from Hugging Face Hub
+llm = HuggingFaceHub(
+    repo_id="google/flan-t5-base",
+    model_kwargs={"temperature": 0.5}
+)
 
-# Load vector DB
-db = FAISS.load_local("vector_store", embeddings=embedding, allow_dangerous_deserialization=True)
-retriever = db.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+# Build RAG chain
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectorstore.as_retriever()
+)
 
-# Load LLM
-pipe = pipeline("text2text-generation", model="google/flan-t5-large", max_new_tokens=250)
-llm = HuggingFacePipeline(pipeline=pipe)
-
-# RAG QA chain
-qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-
-def query_pipeline(query):
-    result = qa(query)
-    return result["result"], result["source_documents"]
+if __name__ == "__main__":
+    while True:
+        query = input("\nAsk a question: ")
+        if query.lower() in ["exit", "quit"]:
+            break
+        answer = qa_chain.invoke(query)
+        print("\nAnswer:", answer)

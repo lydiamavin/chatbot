@@ -1,43 +1,55 @@
-import os
+
 import sys
+import os
 import streamlit as st
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Force add current directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from rag.rag_pipeline import query_pipeline  # Your custom query function
+# ✅ Now import after setting path
+import importlib.util
 
-st.set_page_config(page_title="RAG Chatbot", page_icon="🧠")
+spec = importlib.util.spec_from_file_location("query", "./embed/query.py")
+query_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(query_module)
 
-st.title("Hey there!")
+vectorstore = query_module.vectorstore
+from langchain.chains import RetrievalQA
+from langchain_huggingface import HuggingFaceEndpoint
 
-# Initialize session state to store chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Setup page
+st.set_page_config(page_title="RAG Chatbot", layout="wide")
+st.title("💬 RAG-based Chatbot")
 
-# Display chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+# Initialize LLM
+llm = HuggingFaceEndpoint(
+    repo_id="google/flan-t5-base",
+    task="text-generation",
+    temperature=0.5,
+    max_new_tokens=200,
+    huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_API_TOKEN")
+)
 
-# Chat input
-if query := st.chat_input("Ask a question based on the documents..."):
-    # Display user's message
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
+# Build RAG chain
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectorstore.as_retriever(),
+    return_source_documents=True
+)
 
-    # Call your RAG pipeline
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            answer, sources = query_pipeline(query)
-            st.markdown(f"**Answer:** {answer}")
+# Input box
+query = st.text_input("Ask a question:", placeholder="e.g. What is PMAY?")
+if query:
+    with st.spinner("Generating answer..."):
+        try:
+            result = qa_chain.invoke({"query": query})
+            st.markdown("### ✅ Answer:")
+            st.write(result["result"])
 
-            # Optionally show sources
-            if sources:
-                st.markdown("**Sources:**")
-                for doc in sources:
-                    source = doc.metadata.get("source", "unknown")
-                    st.markdown(f"- {source}")
-
-    # Save assistant's response
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+            # Optional: Show source documents
+            with st.expander("📄 Source Documents"):
+                for i, doc in enumerate(result["source_documents"]):
+                    st.markdown(f"**Document {i+1}:**")
+                    st.write(doc.page_content)
+        except Exception as e:
+            st.error(f"⚠️ Error: {str(e)}")
