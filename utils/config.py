@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENV")  # Use like "us-central1"
-PINECONE_INDEX_NAME = "rag-legal-index"
+PINECONE_ENV = os.getenv("PINECONE_ENV")
+PINECONE_INDEX_NAME = "rag-sports-index"
 
 EMBEDDING_MODEL_NAME = "hkunlp/instructor-xl"
 EMBEDDING_MODEL_CACHE = "./model_cache"

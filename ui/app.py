@@ -1,4 +1,3 @@
-# app.py
 import sys
 import os
 import streamlit as st
@@ -11,225 +10,310 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import LLMChain
 from langchain_core.documents import Document
 import re
+from sentence_transformers import SentenceTransformer, util
+import numpy as np
 
-# Load environment
 load_dotenv()
 
-# Add parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Import vectorstore from embed/query.py
 spec = importlib.util.spec_from_file_location("query", "./embed/query.py")
 query_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(query_module)
 vectorstore = query_module.vectorstore
 
-# Streamlit page config
-st.set_page_config(page_title="RAG Sports Rules Chatbot", page_icon="⚽")
-st.title("Hi! I'm Umpy – Your Sports Rules Assistant")
+st.set_page_config(page_title="Sports Rules Chatbot", page_icon="⚽", layout="wide")
+st.title("Hi! I'm Umpy – Your Sports Rules Assistant 🏆")
 
-# Load LLM with better parameters
-model_id = "google/flan-t5-base"
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
-
-# Improved pipeline with better generation parameters
-pipe = pipeline(
-    "text2text-generation", 
-    model=model, 
-    tokenizer=tokenizer, 
-    max_new_tokens=256,
-    do_sample=True,
-    temperature=0.3,
-    top_p=0.9,
-    repetition_penalty=1.1
-)
-llm = HuggingFacePipeline(pipeline=pipe)
-
-def clean_and_validate_summary(summary_text, original_text):
-    """Clean and validate summary text"""
-    summary = summary_text.strip()
+@st.cache_resource
+def load_models():
+    """Load and cache models for better performance"""
+    model_id = "google/flan-t5-base"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
     
-    # Remove common artifacts and clean up
-    summary = re.sub(r'^(Summary:|Answer:)\s*', '', summary, flags=re.IGNORECASE)
-    summary = summary.strip()
+    pipe = pipeline(
+        "text2text-generation", 
+        model=model, 
+        tokenizer=tokenizer, 
+        max_new_tokens=200,
+        do_sample=True,
+        temperature=0.1,
+        top_p=0.85,
+        repetition_penalty=1.15,
+        early_stopping=True
+    )
+    llm = HuggingFacePipeline(pipeline=pipe)
     
-    # If summary is too short or seems invalid, use a portion of original text
-    if len(summary) < 10 or summary.lower() in ['no', 'none', '']:
-        return original_text[:200] + "..."
+    semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
     
-    return summary
+    return llm, semantic_model
 
-def answer_with_improved_summaries(query, llm, vectorstore, k=6):
-    """Improved RAG function with better summarization and answer generation"""
-    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
-    retrieved_docs = retriever.get_relevant_documents(query)
+llm, semantic_model = load_models()
 
-    # Use smaller chunks for better granularity
-    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=30)
-    small_chunks = []
+def is_greeting_or_thanks(query):
+    """Check if query is just a greeting or thanks"""
+    query_lower = query.lower().strip()
+    greetings = ['hi', 'hello', 'hey']
+    thanks = ['thanks', 'thank you', 'thx', 'ok', 'okay', 'good', 'great', 'nice']
+    if query_lower in greetings or (len(query.split()) <= 2 and any(word in query_lower for word in greetings)):
+        return "greeting"
+    elif query_lower in thanks or (len(query.split()) <= 3 and any(word in query_lower for word in thanks)):
+        return "thanks"
+    return None
+
+def extract_sport_from_query(query):
+    sports_keywords = {
+        'volleyball': ['volleyball', 'volley'],
+        'basketball': ['basketball', 'basket'],
+        'soccer': ['soccer', 'football'],
+        'tennis': ['tennis'],
+        'cricket': ['cricket'],
+        'baseball': ['baseball'],
+        'hockey': ['hockey'],
+        'rugby': ['rugby']
+    }
+    
+    query_lower = query.lower()
+    for sport, keywords in sports_keywords.items():
+        if any(keyword in query_lower for keyword in keywords):
+            return sport
+    return None
+
+def semantic_rerank_chunks(query, chunks, semantic_model, top_k=4):
+    if not chunks:
+        return chunks
+    
+    query_embedding = semantic_model.encode(query, convert_to_tensor=True)
+    chunk_texts = [chunk.page_content for chunk in chunks]
+    chunk_embeddings = semantic_model.encode(chunk_texts, convert_to_tensor=True)
+    
+    similarities = util.cos_sim(query_embedding, chunk_embeddings)[0]
+    similarity_scores = similarities.cpu().numpy()
+    sorted_indices = np.argsort(similarity_scores)[::-1]
+    
+    reranked_chunks = []
+    for idx in sorted_indices[:top_k]:
+        chunk = chunks[idx]
+        chunk.metadata = chunk.metadata or {}
+        chunk.metadata['similarity_score'] = float(similarity_scores[idx])
+        reranked_chunks.append(chunk)
+    
+    return reranked_chunks
+
+def advanced_chunk_processing(retrieved_docs, query):
+    sport = extract_sport_from_query(query)
+    
+    query_words = len(query.split())
+    if query_words > 10:
+        chunk_size = 400
+    elif query_words > 5:
+        chunk_size = 350
+    else:
+        chunk_size = 300
+    
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, 
+        chunk_overlap=50,
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+    
+    all_chunks = []
     for d in retrieved_docs:
-        splits = splitter.split_text(d.page_content)
-        for s in splits:
-            if len(s.strip()) > 50:  # Filter out very small chunks
-                small_chunks.append(Document(page_content=s, metadata=d.metadata or {}))
-
-    # Improved summarization prompt
-    map_prompt = PromptTemplate(
-        input_variables=["text", "question"],
-        template=(
-            "Read this sports rules passage and extract only the specific information that answers the question. "
-            "Be precise and include numbers, rules, or facts that directly relate to the question. "
-            "If the passage doesn't contain relevant information, write 'NOT_RELEVANT'.\n\n"
-            "Passage: {text}\n\n"
-            "Question: {question}\n\n"
-            "Relevant information:"
-        ),
-    )
-    map_chain = LLMChain(llm=llm, prompt=map_prompt)
-
-    summaries = []
-    for chunk in small_chunks:
-        try:
-            summary_raw = map_chain.run({"text": chunk.page_content, "question": query})
-            summary = clean_and_validate_summary(summary_raw, chunk.page_content)
-        except Exception as e:
-            st.warning(f"Error in summarization: {e}")
-            summary = chunk.page_content[:200] + "..."
+        content = d.page_content
+        if sport and sport not in content.lower():
+            content = f"[{sport.title()} Rules] {content}"
         
-        summaries.append({
-            "summary": summary, 
-            "metadata": chunk.metadata, 
-            "orig_text": chunk.page_content
-        })
+        splits = splitter.split_text(content)
+        for s in splits:
+            if len(s.strip()) > 60:
+                metadata = d.metadata.copy() if d.metadata else {}
+                metadata['sport'] = sport
+                all_chunks.append(Document(page_content=s, metadata=metadata))
+    
+    return all_chunks
 
-    # Filter and rank summaries
-    useful_summaries = []
-    for i, x in enumerate(summaries):
-        if "NOT_RELEVANT" not in x["summary"].upper() and len(x["summary"].strip()) > 20:
-            useful_summaries.append(f"Source [{i+1}]: {x['summary']}")
-
-    # Limit context length but ensure we have good information
-    combined_context = "\n\n".join(useful_summaries[:8])
-    if len(combined_context) > 2500:
-        combined_context = combined_context[:2500] + "..."
-
-    # Improved final answer prompt with examples
-    final_prompt = PromptTemplate(
-        input_variables=["context", "question"],
+def create_contextual_summary(chunk_text, query, llm, sport=None):
+    sport_context = f" about {sport}" if sport else ""
+    
+    map_prompt = PromptTemplate(
+        input_variables=["text", "question", "sport_context"],
         template=(
-            "You are a sports rules expert. Use ONLY the provided context to answer the question accurately. "
-            "Give a clear, direct answer with specific numbers or rules when available. "
-            "Reference sources using [Source X] when mentioning specific information.\n\n"
-            "Context:\n{context}\n\n"
+            "Extract the most relevant information from this sports rule passage that directly answers the question{sport_context}. "
+            "Include specific numbers, measurements, conditions, or rules. "
+            "Focus on factual details that help answer the question precisely. "
+            "If the passage is not relevant to the question, respond with 'NOT_RELEVANT'.\n\n"
+            "Rule Passage:\n{text}\n\n"
             "Question: {question}\n\n"
-            "Direct Answer:"
+            "Key Information:"
         ),
     )
-    
-    final_chain = LLMChain(llm=llm, prompt=final_prompt)
     
     try:
-        answer_raw = final_chain.run({"context": combined_context, "question": query})
-        # Clean up the answer
-        answer = re.sub(r'^(Answer:|Direct Answer:)\s*', '', answer_raw.strip(), flags=re.IGNORECASE)
-        answer = answer.strip()
+        chain = LLMChain(llm=llm, prompt=map_prompt)
+        summary = chain.run({
+            "text": chunk_text, 
+            "question": query,
+            "sport_context": sport_context
+        }).strip()
         
-        # Fallback if answer is too short or seems wrong
-        if len(answer) < 10:
-            answer = "Based on the retrieved information: " + combined_context[:200] + "..."
-            
-    except Exception as e:
-        st.error(f"Error generating final answer: {e}")
-        answer = "I found relevant information but encountered an error generating the final answer."
+        summary = re.sub(r'^(Key Information:|Answer:|Summary:)\s*', '', summary, flags=re.IGNORECASE)
+        return summary.strip()
+    except Exception:
+        return chunk_text[:200] + "..."
 
-    # Prepare source information
+def generate_enhanced_answer(context, query, llm, sport=None):
+    sport_expertise = f"As a {sport} rules expert, " if sport else "As a sports rules expert, "
+    
+    enhanced_prompt = PromptTemplate(
+        input_variables=["context", "question", "sport_expertise"],
+        template=(
+            "{sport_expertise}analyze the provided rule excerpts and answer the question with precision.\n\n"
+            "Instructions:\n"
+            "1. Read all the provided information carefully\n"
+            "2. Identify the most relevant facts that answer the question\n"
+            "3. Provide a clear, specific answer with exact numbers or details when available\n"
+            "4. If there are multiple related rules, mention the most important ones\n"
+            "5. Be concise but complete\n\n"
+            "Rule Information:\n{context}\n\n"
+            "Question: {question}\n\n"
+            "Precise Answer:"
+        ),
+    )
+    
+    try:
+        chain = LLMChain(llm=llm, prompt=enhanced_prompt)
+        answer = chain.run({
+            "context": context, 
+            "question": query,
+            "sport_expertise": sport_expertise
+        }).strip()
+        
+        answer = re.sub(r'^(Precise Answer:|Answer:)\s*', '', answer, flags=re.IGNORECASE)
+        return answer.strip()
+    except Exception:
+        return f"Based on the rules provided: {context[:300]}..."
+
+def advanced_rag_pipeline(query, llm, vectorstore, semantic_model, k=8):
+    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    retrieved_docs = retriever.get_relevant_documents(query)
+    
+    if not retrieved_docs:
+        return {"answer": "I couldn't find relevant information in the sports rules database.", "sources": []}
+    
+    chunks = advanced_chunk_processing(retrieved_docs, query)
+    reranked_chunks = semantic_rerank_chunks(query, chunks, semantic_model, top_k=6)
+    sport = extract_sport_from_query(query)
+    
+    summaries = []
+    for chunk in reranked_chunks:
+        summary = create_contextual_summary(chunk.page_content, query, llm, sport)
+        summaries.append({
+            "summary": summary,
+            "metadata": chunk.metadata,
+            "orig_text": chunk.page_content,
+            "similarity_score": chunk.metadata.get('similarity_score', 0)
+        })
+    
+    relevant_summaries = []
+    for i, s in enumerate(summaries):
+        if ("NOT_RELEVANT" not in s["summary"].upper() and 
+            len(s["summary"]) > 15 and 
+            s["similarity_score"] > 0.1):
+            source_ref = f"[Source {i+1}]"
+            relevant_summaries.append(f"{source_ref} {s['summary']}")
+    
+    if not relevant_summaries:
+        relevant_summaries = [f"[Source {i+1}] {s['orig_text'][:200]}..." 
+                            for i, s in enumerate(summaries[:3])]
+    
+    combined_context = "\n\n".join(relevant_summaries[:6])
+    final_answer = generate_enhanced_answer(combined_context, query, llm, sport)
+    
     sources = []
     for i, s in enumerate(summaries[:6]):
         page = s["metadata"].get("page", "N/A") if s["metadata"] else "N/A"
+        sport_detected = s["metadata"].get("sport", "General") if s["metadata"] else "General"
+        similarity = s.get("similarity_score", 0)
+        
         snippet = s["orig_text"].replace("\n", " ").strip()
-        if len(snippet) > 250:
-            snippet = snippet[:250] + "..."
+        if len(snippet) > 300:
+            snippet = snippet[:300] + "..."
         
         sources.append({
-            "index": i+1, 
-            "page": page, 
-            "snippet": snippet, 
+            "index": i+1,
+            "page": page,
+            "sport": sport_detected,
+            "similarity": f"{similarity:.2f}",
+            "snippet": snippet,
             "summary": s["summary"]
         })
-
+    
     return {
-        "answer": answer, 
+        "answer": final_answer,
         "sources": sources,
-        "context_used": combined_context  # For debugging
+        "context_used": combined_context,
+        "sport_detected": sport,
+        "total_sources": len(retrieved_docs)
     }
 
-# Enhanced debug mode
-DEBUG_MODE = st.sidebar.checkbox("Show Debug Info", value=False)
+k_value = 15 
+left_col, center_col, right_col = st.columns([1, 2, 1])
 
-# ---- Streamlit Chat ----
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Chat input
-query = st.chat_input("Got a question about sports rules? Type it here...")
+bottom_placeholder = st.empty()
+query = bottom_placeholder.chat_input("Ask me anything about sports rules...", key="chat_input")
+
+if "process_question" in st.session_state:
+    query = st.session_state.process_question
+    del st.session_state.process_question
 
 if query:
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
+    if not st.session_state.messages or st.session_state.messages[-1]["content"] != query:
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("user"):
+            st.markdown(query)
+    
+    query_type = is_greeting_or_thanks(query)
+    if query_type == "greeting":
+        reply = "Hello! 👋 How can I help you with sports rules today?"
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+        with st.chat_message("assistant"):
+            st.markdown(reply)
+        st.stop()
+    elif query_type == "thanks":
+        reply = "You're welcome! 😊 Always here if you need more help."
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+        with st.chat_message("assistant"):
+            st.markdown(reply)
+        st.stop()
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing sports rules..."):
+        with st.spinner("🤔 Thinking..."):
             try:
-                rag_out = answer_with_improved_summaries(query, llm, vectorstore, k=6)
+                rag_result = advanced_rag_pipeline(query, llm, vectorstore, semantic_model, k=k_value)
+                answer = rag_result['answer']
+                st.markdown(f"\n\n{answer}")
+                st.session_state.messages.append({"role": "assistant", "content": answer})
                 
-                # Display the answer
-                st.markdown(f"\n\n{rag_out['answer']}")
-                st.session_state.messages.append({"role": "assistant", "content": rag_out["answer"]})
-
-                # Source documents with better formatting
-                with st.expander("📄 Source Documents", expanded=False):
-                    for src in rag_out["sources"]:
-                        st.markdown(f"**[{src['index']}] Page {src['page']}**")
-                        
-                        # Only show summary if it's meaningful
+                sport = rag_result.get('sport_detected', 'Not detected')
+                st.info(f"🏀 Sport: **{sport.title() if sport else 'General'}**")
+                
+                with st.expander("📄 Detailed Sources", expanded=False):
+                    for src in rag_result["sources"]:
                         if len(src['summary']) > 20 and "NOT_RELEVANT" not in src['summary'].upper():
-                            st.markdown(f"*Key Info:* {src['summary']}")
-                        
-                        st.markdown(f"*Source Text:* {src['snippet']}")
+                            st.markdown(f"**Key Info:** {src['summary']}")
+                        st.markdown(f"**Source Text:** {src['snippet']}")
+                        st.markdown(f"*Similarity Score: {src['similarity']}*")
                         st.markdown("---")
-                
-                # Debug information
-                if DEBUG_MODE:
-                    with st.expander("🔍 Debug Information"):
-                        st.markdown("**Context sent to LLM:**")
-                        st.text(rag_out.get('context_used', 'N/A'))
-                        
             except Exception as e:
-                error_msg = f"⚠️ I encountered an error while processing your question: {str(e)}"
+                error_msg = "⚠️ Sorry, something went wrong while processing your request. Please try rephrasing your question."
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                
-                if DEBUG_MODE:
-                    st.exception(e)
-
-with st.sidebar:
-    
-    st.markdown("### 🏆 Example Questions")
-    example_questions = [
-        "How many players in a volleyball team?",
-        "What is the offside rule in soccer?",
-        "How many fouls before ejection in basketball?",
-        "What is the size of a tennis court?"
-    ]
-    
-    for eq in example_questions:
-        if st.button(eq, key=eq):
-            st.session_state.messages.append({"role": "user", "content": eq})
-            st.rerun()
