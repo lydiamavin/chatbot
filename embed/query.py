@@ -6,7 +6,7 @@ from langchain.chains import RetrievalQA
 from langchain_pinecone import PineconeVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from pinecone import Pinecone
-from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForSeq2SeqLM, pipeline, AutoTokenizer, AutoModelForCausalLM
 
 from utils.config import (
     PINECONE_API_KEY,
@@ -36,9 +36,9 @@ vectorstore = PineconeVectorStore(
 )
 
 # 4. Local model for text generation using transformers pipeline
-model_id = "bigscience/bloomz-560m"
+model_id = "google/flan-t5-base"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(model_id)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
 pipe = pipeline("text2text-generation", model=model, tokenizer=tokenizer, max_new_tokens=256)
 
 llm = HuggingFacePipeline(pipeline=pipe)
@@ -57,7 +57,7 @@ if __name__ == "__main__":
             break
         try:
             result = qa_chain.invoke({"query": query})
-            print("\nAnswer:", result["result"])
+            print(result["result"])
         except Exception as e:
             print("\n❌ Error:", str(e))
             traceback.print_exc()

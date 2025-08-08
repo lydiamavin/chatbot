@@ -1,128 +1,235 @@
+# app.py
 import sys
 import os
 import streamlit as st
 import importlib.util
+from dotenv import load_dotenv
+from langchain.prompts import PromptTemplate
+from langchain_huggingface import HuggingFacePipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import LLMChain
+from langchain_core.documents import Document
+import re
+
+# Load environment
+load_dotenv()
 
 # Add parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Import query module
+# Import vectorstore from embed/query.py
 spec = importlib.util.spec_from_file_location("query", "./embed/query.py")
 query_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(query_module)
-
-# Vector store from embed/query.py
 vectorstore = query_module.vectorstore
 
-from langchain.chains import RetrievalQA
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
-from langchain.prompts import PromptTemplate
-from langchain_huggingface import HuggingFacePipeline
+# Streamlit page config
+st.set_page_config(page_title="RAG Sports Rules Chatbot", page_icon="⚽")
+st.title("Hi! I'm Umpy – Your Sports Rules Assistant")
 
-# Set Streamlit page config
-st.set_page_config(page_title="RAG Chatbot", page_icon="⚽")
-st.title("Hi! I'm Umpy")
-
-# Initialize LLM
-model_id = "google/flan-t5-base"  # You can upgrade to flan-t5-xl or mistral if needed
+# Load LLM with better parameters
+model_id = "google/flan-t5-base"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
 
-pipe = pipeline("text2text-generation", model=model, tokenizer=tokenizer, max_new_tokens=512)
+# Improved pipeline with better generation parameters
+pipe = pipeline(
+    "text2text-generation", 
+    model=model, 
+    tokenizer=tokenizer, 
+    max_new_tokens=256,
+    do_sample=True,
+    temperature=0.3,
+    top_p=0.9,
+    repetition_penalty=1.1
+)
 llm = HuggingFacePipeline(pipeline=pipe)
 
-# Prompt Template
-from langchain.prompts import PromptTemplate
+def clean_and_validate_summary(summary_text, original_text):
+    """Clean and validate summary text"""
+    summary = summary_text.strip()
+    
+    # Remove common artifacts and clean up
+    summary = re.sub(r'^(Summary:|Answer:)\s*', '', summary, flags=re.IGNORECASE)
+    summary = summary.strip()
+    
+    # If summary is too short or seems invalid, use a portion of original text
+    if len(summary) < 10 or summary.lower() in ['no', 'none', '']:
+        return original_text[:200] + "..."
+    
+    return summary
 
-from langchain.prompts import PromptTemplate
+def answer_with_improved_summaries(query, llm, vectorstore, k=6):
+    """Improved RAG function with better summarization and answer generation"""
+    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    retrieved_docs = retriever.get_relevant_documents(query)
 
-prompt = PromptTemplate(
-    input_variables=["context", "question"],
-    template="""
-You are a friendly, knowledgeable sports rules assistant chatbot.  
-Your purpose is to answer questions about the official rules of football, basketball, cricket, tennis, and volleyball using only the information from the provided context.  
-You can also engage naturally in casual conversation (e.g., greetings, small talk, thanks) in a polite and concise way.
+    # Use smaller chunks for better granularity
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=30)
+    small_chunks = []
+    for d in retrieved_docs:
+        splits = splitter.split_text(d.page_content)
+        for s in splits:
+            if len(s.strip()) > 50:  # Filter out very small chunks
+                small_chunks.append(Document(page_content=s, metadata=d.metadata or {}))
 
-### Context (from official sports rulebooks):
-{context}
+    # Improved summarization prompt
+    map_prompt = PromptTemplate(
+        input_variables=["text", "question"],
+        template=(
+            "Read this sports rules passage and extract only the specific information that answers the question. "
+            "Be precise and include numbers, rules, or facts that directly relate to the question. "
+            "If the passage doesn't contain relevant information, write 'NOT_RELEVANT'.\n\n"
+            "Passage: {text}\n\n"
+            "Question: {question}\n\n"
+            "Relevant information:"
+        ),
+    )
+    map_chain = LLMChain(llm=llm, prompt=map_prompt)
 
-### User Question:
-{question}
+    summaries = []
+    for chunk in small_chunks:
+        try:
+            summary_raw = map_chain.run({"text": chunk.page_content, "question": query})
+            summary = clean_and_validate_summary(summary_raw, chunk.page_content)
+        except Exception as e:
+            st.warning(f"Error in summarization: {e}")
+            summary = chunk.page_content[:200] + "..."
+        
+        summaries.append({
+            "summary": summary, 
+            "metadata": chunk.metadata, 
+            "orig_text": chunk.page_content
+        })
 
-### Your Instructions:
-1. **If the question is about sports rules:**
-   - Give a clear, structured, and accurate answer.
-   - Reference the relevant rule, law, or section from the context when applicable.
-   - Keep explanations easy to understand for a general audience.
-   - Provide examples or clarifications if they make the rule easier to grasp.
-   - If the context contains partial information, answer with what is available and suggest what additional details might be needed.
+    # Filter and rank summaries
+    useful_summaries = []
+    for i, x in enumerate(summaries):
+        if "NOT_RELEVANT" not in x["summary"].upper() and len(x["summary"].strip()) > 20:
+            useful_summaries.append(f"Source [{i+1}]: {x['summary']}")
 
-2. **If the user greets you (e.g., "hi", "hello")**:
-   - Respond warmly and invite them to ask a sports rules question.
+    # Limit context length but ensure we have good information
+    combined_context = "\n\n".join(useful_summaries[:8])
+    if len(combined_context) > 2500:
+        combined_context = combined_context[:2500] + "..."
 
-3. **If the user thanks you (e.g., "thanks", "thank you")**:
-   - Acknowledge politely and offer further assistance.
+    # Improved final answer prompt with examples
+    final_prompt = PromptTemplate(
+        input_variables=["context", "question"],
+        template=(
+            "You are a sports rules expert. Use ONLY the provided context to answer the question accurately. "
+            "Give a clear, direct answer with specific numbers or rules when available. "
+            "Reference sources using [Source X] when mentioning specific information.\n\n"
+            "Context:\n{context}\n\n"
+            "Question: {question}\n\n"
+            "Direct Answer:"
+        ),
+    )
+    
+    final_chain = LLMChain(llm=llm, prompt=final_prompt)
+    
+    try:
+        answer_raw = final_chain.run({"context": combined_context, "question": query})
+        # Clean up the answer
+        answer = re.sub(r'^(Answer:|Direct Answer:)\s*', '', answer_raw.strip(), flags=re.IGNORECASE)
+        answer = answer.strip()
+        
+        # Fallback if answer is too short or seems wrong
+        if len(answer) < 10:
+            answer = "Based on the retrieved information: " + combined_context[:200] + "..."
+            
+    except Exception as e:
+        st.error(f"Error generating final answer: {e}")
+        answer = "I found relevant information but encountered an error generating the final answer."
 
-4. **If the context does not contain enough relevant information:**
-   - Respond helpfully without fabricating facts.
-   - Use a safe, natural fallback such as:
-     > "I couldn’t find the exact rule in the material I have, but here’s what I can tell you based on related rules..."
-     or
-     > "The documents I have don’t specify that exact scenario, but here’s what usually applies according to the rules provided..."
+    # Prepare source information
+    sources = []
+    for i, s in enumerate(summaries[:6]):
+        page = s["metadata"].get("page", "N/A") if s["metadata"] else "N/A"
+        snippet = s["orig_text"].replace("\n", " ").strip()
+        if len(snippet) > 250:
+            snippet = snippet[:250] + "..."
+        
+        sources.append({
+            "index": i+1, 
+            "page": page, 
+            "snippet": snippet, 
+            "summary": s["summary"]
+        })
 
-5. **Maintain chatbot tone**:
-   - Be concise but friendly.
-   - Avoid overly formal legalistic tone unless the user specifically asks for it.
-   - Adapt your style to the user's tone — more casual for casual chats, more formal for detailed rule queries.
+    return {
+        "answer": answer, 
+        "sources": sources,
+        "context_used": combined_context  # For debugging
+    }
 
-### Begin your response below:
-"""
-)
-# Create RAG chain
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=vectorstore.as_retriever(),
-    return_source_documents=True,
-    chain_type="stuff",
-    chain_type_kwargs={"prompt": prompt}
-)
+# Enhanced debug mode
+DEBUG_MODE = st.sidebar.checkbox("Show Debug Info", value=False)
 
-# Session state for chat
+# ---- Streamlit Chat ----
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display past messages
+# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Get user input
+# Chat input
 query = st.chat_input("Got a question about sports rules? Type it here...")
 
 if query:
-    # Show user message
     st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
 
-    # Get response from RAG chain
     with st.chat_message("assistant"):
-        with st.spinner("Generating answer..."):
+        with st.spinner("Analyzing sports rules..."):
             try:
-                result = qa_chain.invoke({"query": query})
-                answer = result["result"]
+                rag_out = answer_with_improved_summaries(query, llm, vectorstore, k=6)
+                
+                # Display the answer
+                st.markdown(f"\n\n{rag_out['answer']}")
+                st.session_state.messages.append({"role": "assistant", "content": rag_out["answer"]})
 
-                # Format answer
-                st.markdown(f"**Answer:**\n\n{answer}")
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-
-                # Source documents
-                with st.expander("📄 Source Documents"):
-                    for i, doc in enumerate(result["source_documents"]):
-                        st.markdown(f"**Document {i+1}:**")
-                        st.markdown(doc.page_content)
-
+                # Source documents with better formatting
+                with st.expander("📄 Source Documents", expanded=False):
+                    for src in rag_out["sources"]:
+                        st.markdown(f"**[{src['index']}] Page {src['page']}**")
+                        
+                        # Only show summary if it's meaningful
+                        if len(src['summary']) > 20 and "NOT_RELEVANT" not in src['summary'].upper():
+                            st.markdown(f"*Key Info:* {src['summary']}")
+                        
+                        st.markdown(f"*Source Text:* {src['snippet']}")
+                        st.markdown("---")
+                
+                # Debug information
+                if DEBUG_MODE:
+                    with st.expander("🔍 Debug Information"):
+                        st.markdown("**Context sent to LLM:**")
+                        st.text(rag_out.get('context_used', 'N/A'))
+                        
             except Exception as e:
-                error_msg = f"⚠️ Error: {str(e)}"
+                error_msg = f"⚠️ I encountered an error while processing your question: {str(e)}"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                
+                if DEBUG_MODE:
+                    st.exception(e)
+
+with st.sidebar:
+    
+    st.markdown("### 🏆 Example Questions")
+    example_questions = [
+        "How many players in a volleyball team?",
+        "What is the offside rule in soccer?",
+        "How many fouls before ejection in basketball?",
+        "What is the size of a tennis court?"
+    ]
+    
+    for eq in example_questions:
+        if st.button(eq, key=eq):
+            st.session_state.messages.append({"role": "user", "content": eq})
+            st.rerun()
