@@ -12,7 +12,6 @@ from utils.config import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_CACHE,
 )
-PINECONE_INDEX_NAME="rag-sports-index"
 load_dotenv()
 
 embedding_model = HuggingFaceEmbeddings(
