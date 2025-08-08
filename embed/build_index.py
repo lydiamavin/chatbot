@@ -12,6 +12,10 @@ from utils.config import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_CACHE,
 )
+print(PINECONE_API_KEY)
+print(PINECONE_INDEX_NAME)
+PINECONE_INDEX_NAME="rag-sports-index"
+print(PINECONE_INDEX_NAME)
 
 # Load environment variables
 load_dotenv()
@@ -48,13 +52,13 @@ vectorstore = PineconeVectorStore(
     pinecone_api_key=PINECONE_API_KEY
 )
 
-
-# print("🔍 Testing similarity search:")
-# results = vectorstore.similarity_search("What is the policy?", k=2)
-# for i, doc in enumerate(results):
-#     print(f"Result {i+1}: {doc.page_content[:200]}")
-# Step 7: Add documents
+print(len(documents))
 vectorstore.add_documents(documents)
 
 print(f"✅ Successfully embedded and added {len(documents)} documents to Pinecone.")
 
+print("🔍 Testing similarity search:")
+results = vectorstore.similarity_search("What is the policy?", k=2)
+for i, doc in enumerate(results):
+    print(f"Result {i+1}: {doc.page_content[:200]}")
+# Step 7: Add documents

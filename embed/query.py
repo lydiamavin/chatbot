@@ -14,7 +14,7 @@ from utils.config import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_CACHE,
 )
-
+PINECONE_INDEX_NAME="rag-sports-index"
 load_dotenv()
 
 # 1. Embedding model from langchain_huggingface (no torch/sentence_transformers)
@@ -36,7 +36,7 @@ vectorstore = PineconeVectorStore(
 )
 
 # 4. Local model for text generation using transformers pipeline
-model_id = "bigscience/bloomz-560m"  # You can change this
+model_id = "bigscience/bloomz-560m"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(model_id)
 pipe = pipeline("text2text-generation", model=model, tokenizer=tokenizer, max_new_tokens=256)
